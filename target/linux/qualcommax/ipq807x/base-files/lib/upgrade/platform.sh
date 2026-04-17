@@ -58,88 +58,6 @@ remove_oem_ubi_volume() {
 	fi
 }
 
-bootconfig_rw_index() {
-	. /lib/functions/bootconfig.sh
-
-	local bootcfg="$1"
-	local partname="$2"
-	local index="$3"
-	local mtdidx
-	local tempfile
-	local current
-
-	if [ -z "$bootcfg" ] || [ -z "$partname" ]; then
-		echo "no value specified for bootconfig or partition entry"
-		return 1
-	fi
-
-	case "$index" in
-	0|1|"") ;;
-	*)
-		echo "invalid bootconfig index specified \"$index\""
-		return 1
-		;;
-	esac
-
-	mtdidx=$(find_mtd_index "$bootcfg")
-	[ ! "$mtdidx" ] && {
-		echo "cannot find mtd index for $partname"
-		return 1
-	}
-
-	tempfile=/tmp/mtd"$mtdidx".bin
-	dd if=/dev/mtd"$mtdidx" of="$tempfile" bs=1 count=336
-	[ $? -ne 0 ] || [ ! -f "$tempfile" ] && {
-		echo "failed to create a temp copy of /dev/mtd$mtdidx"
-		return 1
-	}
-
-	current=$(get_bootconfig_primaryboot "$tempfile" "$partname")
-
-	if [ -z "$index" ]; then
-		echo "$current"
-	elif [ "$current" != "$index" ]; then
-		set_bootconfig_primaryboot "$tempfile" "$partname" "$index"
-		mtd write "$tempfile" /dev/mtd"$mtdidx" 2>/dev/null
-		[ $? -ne 0 ] && {
-			echo "failed to write temp copy back to /dev/mtd$mtdidx"
-			return 1
-		}
-	fi
-
-	rm "$tempfile"
-}
-
-tcl_swap_active_root() {
-	local index
-
-	index=$(bootconfig_rw_index "0:BOOTCONFIG" rootfs)
-	if [ -z "$index" ]; then
-		v "failed to read bootconfig index..."
-		nand_do_upgrade_failed
-	fi
-
-	if [ "$index" = "1" ]; then
-		bootconfig_rw_index "0:BOOTCONFIG" rootfs 0
-		bootconfig_rw_index "0:BOOTCONFIG1" rootfs 0
-	else
-		bootconfig_rw_index "0:BOOTCONFIG" rootfs 1
-		bootconfig_rw_index "0:BOOTCONFIG1" rootfs 1
-	fi
-}
-
-tcl_upgrade_prepare() {
-	local delay
-
-	delay=$(fw_printenv -n bootdelay)
-	[ -z "$delay" ] || [ "$delay" -eq "0" ] && fw_setenv bootdelay 3
-
-	if [ -z "$UPGRADE_OPT_USE_CURR_PART" ]; then
-		tcl_swap_active_root
-		CI_UBIPART="rootfs_1"
-	fi
-}
-
 tplink_get_boot_part() {
 	local cur_boot_part
 	local args
@@ -261,15 +179,12 @@ platform_do_upgrade() {
 	compex,wpq873|\
 	dynalink,dl-wrx36|\
 	edimax,cax1800|\
-	netgear,rbr750|\
-	netgear,rbs750|\
 	netgear,rax120v2|\
 	netgear,sxr80|\
 	netgear,sxs80|\
 	netgear,wax218|\
 	netgear,wax620|\
 	netgear,wax630|\
-	zyxel,nwa110ax|\
 	zyxel,nwa210ax)
 		nand_do_upgrade "$1"
 		;;
@@ -376,10 +291,6 @@ platform_do_upgrade() {
 		CI_DATAPART="rootfs_data"
 		emmc_do_upgrade "$1"
 		;;
-	tcl,linkhub-hh500v)
-		tcl_upgrade_prepare
-		nand_do_upgrade "$1"
-		;;
 	tplink,deco-x80-5g|\
 	tplink,eap620hd-v1|\
 	tplink,eap660hd-v1)
@@ -431,21 +342,6 @@ platform_do_upgrade() {
 		fi
 		emmc_do_upgrade "$1"
 		;;
-	verizon,cr1000a)
-		CI_KERNPART="0:HLOS"
-		CI_ROOTPART="rootfs"
-		rootpart=$(find_mmc_part "$CI_ROOTPART")
-		mmcblk_hlos=$(find_mmc_part "$CI_KERNPART" | sed -e "s/^\/dev\///")
-		hlos_start=$(cat /sys/class/block/$mmcblk_hlos/start)
-		hlos_size=$(cat /sys/class/block/$mmcblk_hlos/size)
-		hlos_start_hex=$(printf "%X\n" "$hlos_start")
-		hlos_size_hex=$(printf "%X\n" "$hlos_size")
-		fw_setenv set_custom_bootargs "setenv bootargs console=ttyMSM0,115200n8 root=$rootpart rootwait fstools_ignore_partname=1"
-		fw_setenv read_hlos_emmc "mmc read 44000000 0x$hlos_start_hex 0x$hlos_size_hex"
-		fw_setenv setup_and_boot "run set_custom_bootargs;run read_hlos_emmc; bootm 44000000"
-		fw_setenv bootcmd "run setup_and_boot"
-		emmc_do_upgrade "$1"
-		;;
 	*)
 		default_do_upgrade "$1"
 		;;
@@ -457,10 +353,8 @@ platform_copy_config() {
 	prpl,haze|\
 	qnap,301w|\
 	spectrum,sax1v1k|\
-	verizon,cr1000a|\
 	zyxel,nbg7815)
 		emmc_copy_config
 		;;
 	esac
 }
-

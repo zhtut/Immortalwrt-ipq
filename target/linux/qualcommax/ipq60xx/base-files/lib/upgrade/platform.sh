@@ -115,40 +115,11 @@ platform_do_upgrade() {
 		fw_setenv bootcount 0
 		nand_do_upgrade "$1"
 		;;
-	anysafe,e1)
-		CI_UBIPART="rootfs"
-		nand_do_upgrade "$1"
-		;;
-	cmiot,ax18|\
-	redmi,ax5|\
-	xiaomi,ax1800|\
-	zn,m2|\
 	glinet,gl-ax1800|\
 	glinet,gl-axt1800|\
-	netgear,rbr350|\
-	netgear,rbs350|\
 	netgear,wax214|\
 	qihoo,360v6)
 		nand_do_upgrade "$1"
-		;;
-	jdcloud,re-cs-02|\
-	jdcloud,re-cs-07|\
-	jdcloud,re-ss-01|\
-	link,nn6000-v1|\
-	link,nn6000-v2|\
-	philips,ly1800|\
-	redmi,ax5-jdcloud|\
-	sy,y6010)
-		local cfgpart=$(find_mmc_part "0:BOOTCONFIG")
-		part_num="$(hexdump -e '1/1 "%01x|"' -n 1 -s 148 -C "$cfgpart" | cut -f 1 -d "|" | head -n1)"
-		if [ "$part_num" -eq "1" ]; then
-			CI_KERNPART="0:HLOS_1"
-			CI_ROOTPART="rootfs_1"
-		else
-			CI_KERNPART="0:HLOS"
-			CI_ROOTPART="rootfs"
-		fi
-		emmc_do_upgrade "$1"
 		;;
 	netgear,wax610|\
 	netgear,wax610y)
@@ -171,9 +142,6 @@ platform_do_upgrade() {
 		fw_setenv auto_recovery yes
 		nand_do_upgrade "$1"
 		;;
-	tplink,eap610od|\
-	tplink,eap620hd-v3|\
-	tplink,eap625od-hd-v1|\
 	tplink,eap610-outdoor|\
 	tplink,eap623od-hd-v1|\
 	tplink,eap625-outdoor-hd-v1)
@@ -193,21 +161,6 @@ platform_do_upgrade() {
 		;;
 	*)
 		default_do_upgrade "$1"
-		;;
-	esac
-}
-
-platform_copy_config() {
-	case "$(board_name)" in
-	jdcloud,re-cs-02|\
-	jdcloud,re-cs-07|\
-	jdcloud,re-ss-01|\
-	link,nn6000-v1|\
-	link,nn6000-v2|\
-	philips,ly1800|\
-	redmi,ax5-jdcloud|\
-	sy,y6010)
-		emmc_copy_config
 		;;
 	esac
 }
