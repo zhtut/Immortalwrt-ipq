@@ -1,96 +1,92 @@
 #!/usr/bin/env bash
 #
 # update_branch.sh
-# 从 https://github.com/immortalwrt/immortalwrt.git 的 openwrt-25.12 分支
-# 强制更新当前仓库代码，并提交。
+# 从 immortalwrt 上游 openwrt-25.12 分支同步代码到当前仓库，并提交。
 #
-# 特性:
-#   - 先用 ls-remote 检查上游 SHA，如未更新则直接退出，不做任何操作。
-#   - 浅拉取 (depth=1)，速度快。
-#   - reset --hard 时保留本脚本自身。
-#
+# 同步策略:
+#   - 使用 depth=1 浅克隆，加快下载速度
+#   - 使用 rsync --delete 镜像上游内容到当前目录
+#   - 保留本地 .git 目录与本脚本自身（否则无法提交）
+#   - 提交信息: feat: update (YYYY-MM-DD)
 
 set -euo pipefail
 
 UPSTREAM_URL="https://github.com/immortalwrt/immortalwrt.git"
 UPSTREAM_BRANCH="openwrt-25.12"
-REMOTE_NAME="immortalwrt-upstream"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 当前脚本所在目录即仓库根目录
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_NAME"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cd "$SCRIPT_DIR"
+cd "$REPO_DIR"
 
+# 必须是 git 仓库，否则后续 commit 无意义
 if [ ! -d ".git" ]; then
-    echo "错误: 当前目录不是一个 git 仓库: $SCRIPT_DIR" >&2
+    echo "[ERROR] 当前目录不是 git 仓库: $REPO_DIR" >&2
     exit 1
 fi
 
-# 添加或更新上游 remote
-if git remote get-url "$REMOTE_NAME" >/dev/null 2>&1; then
-    git remote set-url "$REMOTE_NAME" "$UPSTREAM_URL"
-else
-    git remote add "$REMOTE_NAME" "$UPSTREAM_URL"
-fi
+# 依赖检查
+for cmd in git rsync; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[ERROR] 缺少依赖: $cmd" >&2
+        exit 1
+    fi
+done
 
-# 1) 用 ls-remote 拿到上游最新 SHA（轻量，不下载对象）
-echo ">>> 查询上游 $UPSTREAM_BRANCH 最新 commit ..."
-REMOTE_SHA="$(git ls-remote "$REMOTE_NAME" "refs/heads/$UPSTREAM_BRANCH" | awk '{print $1}')"
-if [ -z "$REMOTE_SHA" ]; then
-    echo "错误: 无法获取上游分支 $UPSTREAM_BRANCH 的 SHA" >&2
-    exit 1
-fi
-echo "    上游 SHA: $REMOTE_SHA"
+DATE_STR="$(date +%F)"
+TMP_DIR="$(mktemp -d -t immortalwrt-upstream-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-# 2) 与本地记录的上游 SHA 比较，未变化则直接退出
-LAST_SHA_FILE="$SCRIPT_DIR/.git/.update_branch_last_sha"
-LOCAL_SHA=""
-if [ -f "$LAST_SHA_FILE" ]; then
-    LOCAL_SHA="$(cat "$LAST_SHA_FILE" 2>/dev/null || true)"
-fi
+echo "[INFO] 浅克隆 $UPSTREAM_URL ($UPSTREAM_BRANCH) 到临时目录 ..."
+# 加速选项:
+#   --depth=1                只取最新一次提交
+#   --single-branch          只取目标分支
+#   --no-tags                不下载 tag
+#   --filter=blob:none 已被 depth=1 覆盖, 此处不再叠加
+#   并行: 通过 GIT_HTTP_LOW_SPEED_* 与 protocol.version=2 提升体验
+GIT_TERMINAL_PROMPT=0 git \
+    -c protocol.version=2 \
+    -c http.postBuffer=524288000 \
+    clone \
+    --depth=1 \
+    --single-branch \
+    --branch "$UPSTREAM_BRANCH" \
+    --no-tags \
+    --quiet \
+    "$UPSTREAM_URL" "$TMP_DIR/src"
 
-# 兜底: 如果 remote-tracking 引用已存在，也用它比较
-if [ -z "$LOCAL_SHA" ] && git rev-parse --verify --quiet "refs/remotes/$REMOTE_NAME/$UPSTREAM_BRANCH" >/dev/null; then
-    LOCAL_SHA="$(git rev-parse "refs/remotes/$REMOTE_NAME/$UPSTREAM_BRANCH")"
-fi
+UPSTREAM_SHA="$(git -C "$TMP_DIR/src" rev-parse --short HEAD)"
+echo "[INFO] 上游最新提交: $UPSTREAM_SHA"
 
-if [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
-    echo ">>> 上游无更新 ($REMOTE_SHA)，跳过。"
+echo "[INFO] 使用 rsync 强制覆盖到本地仓库 ..."
+# rsync 说明:
+#   -a            保留权限/时间等
+#   --delete      上游已删除的本地也删除（实现强制对齐）
+#   --exclude     保留 .git 与本脚本，避免破坏仓库与无法提交
+#   源路径结尾的 / 表示同步“目录内容”
+rsync -a --delete \
+    --exclude='.git' \
+    --exclude='.git/**' \
+    --exclude="/$SCRIPT_NAME" \
+    "$TMP_DIR/src/" "$REPO_DIR/"
+
+# 暂存全部变更
+echo "[INFO] git add ..."
+git add -A
+
+if git diff --cached --quiet; then
+    echo "[INFO] 没有需要提交的变更，与上游一致。"
     exit 0
 fi
 
-# 3) 浅拉取上游分支
-echo ">>> 浅拉取上游分支 $UPSTREAM_BRANCH (depth=1) ..."
-git fetch --depth=1 --no-tags "$REMOTE_NAME" "$UPSTREAM_BRANCH"
+COMMIT_MSG="feat: update ($DATE_STR)"
+echo "[INFO] 提交: $COMMIT_MSG"
+git commit -m "$COMMIT_MSG"
 
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-echo ">>> 当前分支: $CURRENT_BRANCH"
+echo "[INFO] 推送到远端 ..."
+CURRENT_BRANCH="$(git symbolic-ref --short HEAD)"
+git push origin "$CURRENT_BRANCH"
 
-# 4) reset --hard 前备份本脚本
-echo ">>> 强制重置到 $REMOTE_NAME/$UPSTREAM_BRANCH ..."
-BACKUP_PATH="$(mktemp -t "${SCRIPT_NAME}.XXXXXX")"
-cp -p "$SCRIPT_PATH" "$BACKUP_PATH"
-
-git reset --hard "$REMOTE_NAME/$UPSTREAM_BRANCH"
-
-# 5) 恢复脚本
-cp -p "$BACKUP_PATH" "$SCRIPT_PATH"
-chmod +x "$SCRIPT_PATH"
-rm -f "$BACKUP_PATH"
-
-DATE_STR="$(date +%Y-%m-%d)"
-COMMIT_MSG="feat: update (${DATE_STR})"
-
-git add -- "$SCRIPT_PATH"
-
-# 如果工作区相对当前 HEAD 没有任何变化，则不创建空提交
-if git diff --cached --quiet && git diff --quiet; then
-    echo ">>> 工作区无差异，无需提交。"
-else
-    git commit -m "$COMMIT_MSG"
-    echo ">>> 完成: $COMMIT_MSG"
-fi
-
-# 6) 记录本次同步到的上游 SHA
-echo "$REMOTE_SHA" > "$LAST_SHA_FILE"
+echo "[DONE] 已同步至上游 ${UPSTREAM_BRANCH}@${UPSTREAM_SHA} 并推送到 origin/${CURRENT_BRANCH}"
